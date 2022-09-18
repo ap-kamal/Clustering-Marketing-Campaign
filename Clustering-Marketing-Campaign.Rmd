@@ -1,0 +1,360 @@
+---
+title: "Clustering Marketing Campaign"
+author: Kamalnath Sathyamurthy
+output:
+  html_document: default
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+library(cluster)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(plotly)
+library(data.table)
+library(caret)
+library(ggbiplot)
+library(tidyr)
+library(tidyverse)
+library(htmltools)
+library(Hmisc)
+library(factoextra)
+library(dummies)
+library(gridExtra)
+
+current_date <- as.Date("2014-07-01")
+```
+
+
+# Problem Statement
+
+An advertisement division of large club store needs to perform customer
+analysis the store customers in order to create a segmentation for more
+targeted marketing campaign
+
+Our goal is to identify similar customers and characterize them (at
+least some of them). In other word perform clustering and identify
+customers segmentation.
+
+    Colomns description:
+    People
+      ID: Customer's unique identifier
+      Year_Birth: Customer's birth year
+      Education: Customer's education level
+      Marital_Status: Customer's marital status
+      Income: Customer's yearly household income
+      Kidhome: Number of children in customer's household
+      Teenhome: Number of teenagers in customer's household
+      Dt_Customer: Date of customer's enrollment with the company
+      Recency: Number of days since customer's last purchase
+      Complain: 1 if the customer complained in the last 2 years, 0 otherwise
+
+    Products
+
+      MntWines: Amount spent on wine in last 2 years
+      MntFruits: Amount spent on fruits in last 2 years
+      MntMeatProducts: Amount spent on meat in last 2 years
+      MntFishProducts: Amount spent on fish in last 2 years
+      MntSweetProducts: Amount spent on sweets in last 2 years
+      MntGoldProds: Amount spent on gold in last 2 years
+
+    Place
+      NumWebPurchases: Number of purchases made through the company’s website
+      NumStorePurchases: Number of purchases made directly in stores
+
+Assume that data was current on 2014-07-01
+
+# 1. Read Dataset and Data Conversion to Proper Data Format
+
+Read "m_marketing_campaign.csv" using `data.table::fread` command,
+examine the data.
+
+> `fread` function of `data.table` read cvs real fast
+
+```{r data_understanding}
+# fread m_marketing_campaign.csv and save it as df
+df = fread("marketing_campaign.csv")
+df_orig <- df
+
+# Checking for irregular data:
+sum(is.na(df))
+sum(is.null(df))
+
+# Getting to know about the data
+head(df,10)
+summary(df)
+```
+
+```{r data_preprocessing}
+# Convert Year_Birth to Age (assume that current date is 2014-07-01)
+df$Age = as.integer(2014 - df$Year_Birth)
+
+# Dt_Customer is a date (it is still character), convert it to membership days (name it MembershipDays)
+df$Dt_Customer = as.Date(df$Dt_Customer,format="%d-%m-%Y")
+df$MembershipDays = as.numeric(difftime(current_date, df$Dt_Customer, "day"))
+# hint: note European date format, use as.Date with proper format argument
+head(df[,c("Year_Birth","Age")],5)
+head(df[,c("Dt_Customer","MembershipDays")],5)
+
+```
+
+```{r}
+# Summarize Education column (use table function)
+# Lets treat Education column as ordinal categories and use simple levels for distance calculations
+# Assuming following order of degrees:
+#    HighSchool, Associate, Bachelor, Master, PhD
+# factorize Education column (hint: use factor function with above levels)
+
+edu_values_bef <- as.data.frame(unique(df$Education))
+# Using Ordinal Encoding for Education column
+encode_ordinal <- function(x, order = unique(x)) {
+  x <- as.numeric(factor(x, levels = order, exclude = NULL))
+  x
+}
+
+df[["Education"]] <- encode_ordinal(df[["Education"]]) 
+edu_values <- as.data.frame(unique(df$Education))
+
+print(paste("Values in Education before encoding:", edu_values_bef))
+print(paste("Values in Education after encoding:", edu_values))
+
+```
+Label encoded values in Education column of dataset.
+
+```{r}
+# Summarize Marital Status column (use table function)
+# Lets convert single Marital_Status categories for 5 separate binary categories 
+# Divorced, Married, Single, Together and Widow, the value will be 1 if customer 
+# is in that category and 0 if customer is not
+#One-Hot encoding for Marital_Status column
+
+
+before_enc <- as.data.frame(colnames(df))
+enc_marital = factor(df$Marital_Status)
+enc_df = as.data.frame(model.matrix(~enc_marital)[,-1])
+df = cbind(df, enc_df)
+after_enc <- as.data.frame(colnames(df))
+
+print(paste("Columns in df before encoding:", before_enc))
+print(paste("Columns in df after encoding:", after_enc))
+
+```
+
+Encoded the Marital status column and added as individual column in dataset.
+
+```{r}
+# lets remove columns which we will no longer use:
+# remove ID, Year_Birth, Dt_Customer, Marital_Status
+# and save it as df_sel 
+df <- subset(df, select = -c(ID,Dt_Customer,Year_Birth,Marital_Status))
+
+# Convert Education to integers 
+df$Education = as.integer(df$Education)
+df_sel <- df
+head(df_sel,5)
+```
+Removed columns ID, Year_Birth, Dt_Customer, Marital_Status
+
+```{r}
+# lets scale
+# run scale function on df_sel and save it as df_scale
+# that will be our scaled values which we will use for analysis
+df_scale <- as.data.frame(scale(df_sel))
+head(df_scale,5)
+```
+
+
+# 2. Run PCA
+Principal Component Analysis produces a low-dimensional representation of a dataset. It finds a sequence of linear combinations of the variables that have maximal variance, and are mutually uncorrelated.
+
+```{r}
+# Run PCA on df_scale, make biplot and scree plot/percentage variance explained plot
+# which(apply(df_scale, 2, var)==0)
+df_scale = df_scale[, which(apply(df_scale, 2, var) != 0)]
+
+pca = prcomp(df_scale[ ,c(1:20)],
+             center = TRUE,scale=TRUE)
+
+ggbiplot(pca, scale = 0, labels=rownames(pca$x), color = TRUE) + geom_point( size = 0.5) + ggtitle("PCA Plot") + theme(plot.title = element_text(hjust = 0.5))
+
+pr.var <- pca$sdev^2
+pve <- pr.var / sum(pr.var)
+Cols <- function(vec) {
+   cols <- rainbow(length(unique(vec)))
+   return(cols[as.numeric(as.factor(vec))])
+ }
+par(mfrow = c(1, 2))
+plot(pve, xlab = "Principal Component",
+    ylab = "Proportion of Variance Explained", ylim = c(0, 1),
+    type = "b")
+plot(cumsum(pve), xlab = "Principal Component",
+    ylab = "Cumulative Proportion of Variance Explained",
+    ylim = c(0, 1), type = "b")
+
+pr_out <- pca
+library(factoextra)
+data_transform = as.data.frame(pca$x[,1:2])
+fviz_nbclust(data_transform, kmeans, method = 'wss')
+
+kmeans_data = kmeans(data_transform, centers = 3, nstart = 50)
+fviz_cluster(kmeans_data, data = data_transform)
+
+k_edu<- kmeans(df_scale$Education, 3, nstart=50)
+
+
+hist(k_edu$cluster,xlab = "Education Cluster",col = "cyan",border = "blue")
+
+```
+
+Below plot (Scree plot) provides information about the proportion of variance explained by each principal component which will be obtained by dividing variance of principal component by total variance of dataset.
+
+# 3. Cluster with K-Means
+
+## 3.1 Selecting Number of Clusters
+
+```{r}
+km.out <- kmeans(df_scale, 2, nstart = 20)
+km.out$cluster
+sum(km.out$cluster == 1)
+
+# Finding optimal k in clutering:
+km_out_list <- lapply(1:10, function(k) list(
+  k=k,
+  km_out=kmeans(df_scale, k, nstart = 20)))
+
+km_results <- data.frame(
+  k=sapply(km_out_list, function(k) k$k),
+  totss=sapply(km_out_list, function(k) k$km_out$totss),
+  tot_withinss=sapply(km_out_list, function(k) k$km_out$tot.withinss)
+  )
+km_results
+
+plot_ly(km_results,x=~k,y=~tot_withinss) %>% layout(title = "Optimal k using the elbow curve method") %>% add_markers() %>% add_paths()
+
+# Choosing k: gap statistics:
+suppressWarnings(gap_kmeans <- clusGap(df_scale, kmeans, nstart = 25, K.max = 10, B = 100))
+plot(gap_kmeans, main = "Gap Statistic: kmeans")
+
+# Choosing k: silhouette:
+par(mar = c(5, 2, 4, 2), mfrow=c(2,2))
+for(k in c(2,3,4,9)) {
+  kmeans_cluster <- kmeans(df_scale, k, nstart=20)
+  si <- silhouette(kmeans_cluster$cluster, dist = dist(df_scale))
+  plot(si,main="")
+}
+
+silhouette_score <- function(k){
+  km <- kmeans(df_scale, centers = k, nstart=25)
+  ss <- silhouette(km$cluster, dist(df_scale))
+  mean(ss[, 3])
+}
+k <- 2:10
+avg_sil <- sapply(k, silhouette_score)
+plot(k, type='b', avg_sil, xlab='Number of clusters', ylab='Average Silhouette Scores', frame=FALSE)
+
+
+fviz_nbclust(df_scale, kmeans, method='silhouette') + ggtitle( "Finding Optimal 'k' using silhouette") + theme(plot.title = element_text(hjust = 0.5))
+
+```
+**Approaches to find optimal k**
+* Elbow curve method
+In the Elbow method, we will be actually varying the number of clusters ( K ) from 1 – n (mostly 10). For each value of K, we are calculating WCSS ( Within-Cluster Sum of Square ). WCSS is the sum of squared distance between each point and the centroid in a cluster. When we plot the WCSS with the K value, the plot looks like an Elbow. As the number of clusters increases, the WCSS value will start to decrease. WCSS value is largest when K = 1. When we analyze the graph, we can see that the graph will rapidly change at a point and thus creating an elbow shape. From this point, the graph starts to move almost parallel to the X-axis. The K value corresponding to this point is the optimal K value or an optimal number of clusters.
+**k value identified in elbow curve method is 2.**
+* Gap statistics method
+This technique uses the output of any clustering algorithm comparing the change in within-cluster dispersion with that expected under an appropriate reference null distribution.
+**k value identified in Gap statistics method is 4.**
+
+* Silhouette method
+A new graphical display is proposed for partitioning techniques. Each cluster is represented by a so-called silhouette, which is based on the comparison of its tightness and separation. This silhouette shows which objects he well within their cluster, and which ones are merely somewhere in between clusters. The entire clustering is displayed by combining the silhouettes into a single plot, allowing an appreciation of the relative quality of the clusters and an overview of the data configuration. The average silhouette width provides an evaluation of clustering validity, and might be used to select an ‘appropriate’ number of clusters.
+** k value identified in Gap statistics method is 2.
+
+Since two approaches got optimal k as 2, we are sticking with 2 for optimal k.
+
+**Final Optimal k is 2**
+
+
+## 3.2 Clusters Visulalization
+
+
+```{r}
+km_out <- kmeans(df_scale,centers = 2, nstart = 25)
+km_2 <- kmeans(df_scale, centers = 4, nstart = 25)
+km_3 <- kmeans(df_scale, centers = 5, nstart = 25)
+km_4 <- kmeans(df_scale, centers = 3, nstart = 25)
+
+km <- cbind(pr_out$x[,1], pr_out$x[,2])
+
+fviz_cluster(km_out, data = df_scale)
+fviz_cluster(km_2, data = df_scale)
+fviz_cluster(km_3, data = df_scale)
+fviz_cluster(km_4, data = df_scale)
+
+# plots to compare
+p1 <- fviz_cluster(km_out, geom = "point",  data = df_scale) + ggtitle("Clustering with k =2") + theme(plot.title = element_text(hjust = 0.5))
+p2 <- fviz_cluster(km_2, geom = "point",  data = df_scale) + ggtitle("Clustering with k =4") + theme(plot.title = element_text(hjust = 0.5))
+p3 <- fviz_cluster(km_3, geom = "point",  data = df_scale) + ggtitle("Clustering with k =5") + theme(plot.title = element_text(hjust = 0.5))
+p4 <- fviz_cluster(km_4, geom = "point",  data = df_scale)  + ggtitle("Clustering with k =3") + theme(plot.title = element_text(hjust = 0.5))
+
+
+```
+
+
+## 3.3 Characterizing Cluster
+
+* **Cluster 1:** Lower Education, Lower Income, Lower Kidhome, Lower Teenhome, Higher MntWInes, Higher Mnt Fruits, Lower Complains, Single and together
+* **Cluster 2:** Higher Education, Higher Income, Higher Kidhome, Higher Teenhome, Lower MntWInes, Lowe Mnt Fruits, Married and divorced
+
+```{r}
+df_scale$Cluster <- km_out$cluster
+head(df_scale,5)
+```
+
+# 4. Cluster with Hierarchical Clustering
+
+Linkage defines how to calculate distance between clusters containing multiple data points. Different methods of linkages are as follows
+* **Complete Linkage:** largest distance between elements of two clusters
+* **Single:** smallest distance between elements of two clusters
+* **Average:** Average dissimilarity between all elements of two clusters
+* **Centroid:** Dissimilarity between the centroids
+
+Number of clusters obtianed using hierarchical method is only 1. 
+
+* single linkage is fast, and can perform well on non-globular data, but it performs poorly in the presence of noise.
+
+* average and complete linkage perform well on cleanly separated globular clusters, but have mixed results otherwise.
+
+* Ward is the most effective method for noisy data
+
+```{r}
+suppressPlotlyMessage <- function(p) {
+  suppressMessages(plotly_build(p))
+}
+
+hc.complete <- hclust(dist(df_scale), method = "complete")
+hc.single <- hclust(dist(df_scale), method = "single")
+hc.average <- hclust(dist(df_scale), method = "average")
+
+df_scale_ct <- cutree(hc.complete, k=2)
+df_scale_sg <- cutree(hc.single, k=2)
+df_scale_ag <- cutree(hc.average, k=2)
+
+par(mfrow = c(1, 3))
+suppressMessages(plot_ly(x=~pr_out$x[,1],y=~pr_out$x[,2], color = as.factor(df_scale_ct), colors=c("red","blue","green"),mode = "markers"))
+suppressMessages(plot_ly(x=~pr_out$x[,1],y=~pr_out$x[,2], color = as.factor(df_scale_sg), colors=c("red","blue","green"),mode = "markers"))
+suppressMessages(plot_ly(x=~pr_out$x[,1],y=~pr_out$x[,2], color = as.factor(df_scale_ag), colors=c("red","blue","green"),mode = "markers"))
+```
+
+# Conclusion
+**k-means clustering** performs better while clustering the marketing campaign dataset properly. With k = 2, clustering is performed more accurately in k-means clustering.
+
+```{r final_clus}
+
+suppressMessages(plot_ly(x=pr_out$x[,1],y=pr_out$x[,2], color = as.factor(km_out$cluster), colors=c("red","blue")))
+
+```
